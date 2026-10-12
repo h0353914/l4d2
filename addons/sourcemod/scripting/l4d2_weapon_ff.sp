@@ -5,7 +5,7 @@
 #include <sdktools>
 #include <sdkhooks>
 
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.1.0"
 #define CONFIG_PATH    "configs/l4d2_weapon_ff.cfg"
 #define TEAM_SURVIVOR  2
 
@@ -21,6 +21,10 @@ public Plugin myinfo =
 StringMap g_Scales;
 float     g_fDefaultScale = 1.0;
 float     g_fSelfScale    = 1.0;
+
+// 依「攻擊者 → 受害者」是真玩家還是 bot 再額外乘上的倍率
+float g_fPlayerToPlayer = 1.0;
+float g_fPlayerToBot    = 1.0;
 
 ConVar g_cvEnable;
 ConVar g_cvDebug;
@@ -74,6 +78,8 @@ public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &dam
 
 	if (attacker == victim)
 		scale *= g_fSelfScale;
+	else
+		scale *= GetPairScale(attacker, victim);
 
 	if (g_cvDebug.BoolValue)
 	{
@@ -146,6 +152,8 @@ bool LoadScales()
 	g_Scales.Clear();
 	g_fDefaultScale = 1.0;
 	g_fSelfScale    = 1.0;
+	g_fPlayerToPlayer = 1.0;
+	g_fPlayerToBot    = 1.0;
 
 	char path[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, path, sizeof path, CONFIG_PATH);
@@ -168,6 +176,8 @@ bool LoadScales()
 	{
 		g_fDefaultScale = kv.GetFloat("default_scale", 1.0);
 		g_fSelfScale    = kv.GetFloat("self_scale", 1.0);
+		g_fPlayerToPlayer = kv.GetFloat("player_to_player", 1.0);
+		g_fPlayerToBot    = kv.GetFloat("player_to_bot", 1.0);
 		kv.GoBack();
 	}
 
@@ -206,6 +216,7 @@ public Action Cmd_Reload(int client, int args)
 public Action Cmd_List(int client, int args)
 {
 	ReplyToCommand(client, "[WeaponFF] default_scale=%.2f self_scale=%.2f", g_fDefaultScale, g_fSelfScale);
+	ReplyToCommand(client, "[WeaponFF] player_to_player=%.2f player_to_bot=%.2f", g_fPlayerToPlayer, g_fPlayerToBot);
 
 	StringMapSnapshot snap = g_Scales.Snapshot();
 	for (int i = 0; i < snap.Length; i++)
@@ -248,6 +259,16 @@ public Action Cmd_Scale(int client, int args)
 // ---------------------------------------------------------------------------
 // 輔助函式
 // ---------------------------------------------------------------------------
+
+// 依攻擊者與受害者是真玩家還是 bot,回傳對應的額外倍率
+// 攻擊者是 bot 時:原版預設就不造成友軍傷害(sb_friendlyfire 為 0),所以不另外提供倍率,維持 1.0
+float GetPairScale(int attacker, int victim)
+{
+	if (IsFakeClient(attacker))
+		return 1.0;
+
+	return IsFakeClient(victim) ? g_fPlayerToBot : g_fPlayerToPlayer;
+}
 
 bool IsSurvivor(int client)
 {
