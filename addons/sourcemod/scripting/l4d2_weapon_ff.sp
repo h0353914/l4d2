@@ -38,7 +38,7 @@ public void OnPluginStart()
 	g_Scales = new StringMap();
 	LoadScales();
 
-	// Late load support.
+	// 支援插件中途載入(已在線的玩家也要掛鉤)
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsClientInGame(i))
@@ -57,7 +57,7 @@ public void OnClientPutInServer(int client)
 }
 
 // ---------------------------------------------------------------------------
-// Damage hook
+// 傷害掛鉤
 // ---------------------------------------------------------------------------
 
 public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &damage, int &damagetype,
@@ -82,15 +82,15 @@ public Action OnTakeDamage(int victim, int &attacker, int &inflictor, float &dam
 	}
 
 	if (scale == 1.0)
-		return Plugin_Continue; // vanilla behaviour, leave the damage untouched
+		return Plugin_Continue; // 倍率為 1.0 = 原版行為,完全不動傷害
 
 	damage *= scale;
 	return Plugin_Changed;
 }
 
 /**
- * Work out which config key describes this hit and return its scale.
- * Lookup order: melee script name -> entity classname -> default_scale.
+ * 判斷這次傷害對應設定檔裡的哪個 key,並回傳該倍率。
+ * 查找順序:近戰腳本名稱 -> 實體 classname -> default_scale
  */
 float ResolveScale(int attacker, int inflictor, int weapon, char[] key, int maxlen)
 {
@@ -99,7 +99,7 @@ float ResolveScale(int attacker, int inflictor, int weapon, char[] key, int maxl
 	if (weapon > MaxClients && IsValidEntity(weapon))
 		ent = weapon;
 	else if (inflictor > MaxClients && IsValidEntity(inflictor))
-		ent = inflictor; // fire, grenades, explosions...
+		ent = inflictor; // 火焰、手榴彈、爆炸等
 	else if (attacker >= 1 && attacker <= MaxClients && IsClientInGame(attacker))
 		ent = GetEntPropEnt(attacker, Prop_Send, "m_hActiveWeapon");
 
@@ -138,7 +138,7 @@ float ResolveScale(int attacker, int inflictor, int weapon, char[] key, int maxl
 }
 
 // ---------------------------------------------------------------------------
-// Config
+// 設定檔
 // ---------------------------------------------------------------------------
 
 bool LoadScales()
@@ -191,7 +191,7 @@ bool LoadScales()
 }
 
 // ---------------------------------------------------------------------------
-// Commands
+// 指令
 // ---------------------------------------------------------------------------
 
 public Action Cmd_Reload(int client, int args)
@@ -246,7 +246,7 @@ public Action Cmd_Scale(int client, int args)
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// 輔助函式
 // ---------------------------------------------------------------------------
 
 bool IsSurvivor(int client)
