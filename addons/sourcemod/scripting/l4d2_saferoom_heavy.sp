@@ -3,6 +3,7 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 
 #define PLUGIN_VERSION "1.0.0"
 #define TEAM_SURVIVOR  2
@@ -11,6 +12,8 @@
 #define WEAPON_GL      "weapon_grenade_launcher"
 #define WEAPON_SAW     "weapon_chainsaw"
 #define WEAPON_MEDKIT  "weapon_first_aid_kit"
+#define UPGRADE_LASER  "upgrade_laser_sight" // 雷射瞄準器補給箱(不是武器,是可以按使用鍵的實體)
+#define WEAPON_KATANA  "weapon_melee_katana" // 假的 classname,實際生成 weapon_melee 並指定腳本名稱 katana
 
 public Plugin myinfo =
 {
@@ -32,6 +35,13 @@ ConVar g_cvM60;
 ConVar g_cvGL;
 ConVar g_cvSaw;
 ConVar g_cvMedkit;
+ConVar g_cvLaser;
+ConVar g_cvKatana;
+ConVar g_cvKeepM60;
+ConVar g_cvDebug;
+ConVar g_cvAutoReload;
+ConVar g_cvReloadAt;
+ConVar g_cvReloadAnim;
 ConVar g_cvRefill;
 ConVar g_cvM60Reserve;
 ConVar g_cvGLReserve;
@@ -43,17 +53,21 @@ ConVar g_cvSawMax;
 int  g_iRound;     // 每回合遞增,用來讓上一回合還沒跑完的計時器失效
 bool g_bApplying;  // 我們自己正在改 ammo cvar 時,不要觸發「被改掉就改回來」
 int  g_iLastButtons[MAXPLAYERS + 1];
-
+float g_flReloadSince[MAXPLAYERS + 1];    // 開始替玩家按換彈鍵的時間,0 表示沒在按
+float g_flReloadCooldown[MAXPLAYERS + 1]; // 換彈一直沒成功時,這個時間之前不再替玩家按
+int  g_iLastReserve[MAXPLAYERS + 1] = { -1, ... }; // 除錯用:上次看到的備彈數
 public void OnPluginStart()
 {
 	CreateConVar("l4d2_saferoom_heavy_version", PLUGIN_VERSION, "Plugin version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
 	g_cvEnable = CreateConVar("l4d2_saferoom_heavy_enable", "1",    "Enable the saferoom heavy weapon drop.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_cvDelay  = CreateConVar("l4d2_saferoom_heavy_delay",  "5.0",  "Seconds between the first living human survivor showing up and the weapons being dropped.", _, true, 1.0, true, 60.0);
-	g_cvM60    = CreateConVar("l4d2_saferoom_heavy_m60",    "2",    "How many M60s to drop (one per randomly picked survivor).", _, true, 0.0, true, 4.0);
-	g_cvGL     = CreateConVar("l4d2_saferoom_heavy_gl",     "2",    "How many grenade launchers to drop (one per randomly picked survivor).", _, true, 0.0, true, 4.0);
+	g_cvM60    = CreateConVar("l4d2_saferoom_heavy_m60",    "4","How many M60s to drop (one per randomly picked survivor).", _, true, 0.0, true, 4.0);
+	g_cvGL     = CreateConVar("l4d2_saferoom_heavy_gl",     "4","How many grenade launchers to drop (one per randomly picked survivor).", _, true, 0.0, true, 4.0);
 
-	g_cvSaw    = CreateConVar("l4d2_saferoom_heavy_chainsaw", "1", "How many chainsaws to drop.", _, true, 0.0, true, 4.0);
-	g_cvMedkit = CreateConVar("l4d2_saferoom_heavy_medkit",   "2", "How many first aid kits to drop.", _, true, 0.0, true, 8.0);
+	g_cvSaw    = CreateConVar("l4d2_saferoom_heavy_chainsaw", "4","How many chainsaws to drop.", _, true, 0.0, true, 4.0);
+	g_cvMedkit = CreateConVar("l4d2_saferoom_heavy_medkit",   "8","How many first aid kits to drop.", _, true, 0.0, true, 8.0);
+	g_cvLaser  = CreateConVar("l4d2_saferoom_heavy_laser",    "1", "How many laser sight boxes to drop.", _, true, 0.0, true, 4.0);
+	g_cvKatana = CreateConVar("l4d2_saferoom_heavy_katana",   "4", "How many katanas to drop.", _, true, 0.0, true, 8.0);
 
 	g_cvRefill     = CreateConVar("l4d2_saferoom_heavy_refill",    "1",  "1 = using an ammo pile while holding an M60 / grenade launcher refills it.", _, true, 0.0, true, 1.0);
 	g_cvM60Reserve = CreateConVar("l4d2_saferoom_heavy_m60_reserve", "-1", "Reserve ammo set on a dropped / refilled M60. -1 = ammo_m60_max minus the clip size.", _, true, -1.0);
@@ -68,6 +82,19 @@ public void OnPluginStart()
 
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 	HookEvent("ammo_pickup", Event_AmmoPickup);
+
+	g_cvReloadAnim = CreateConVar("l4d2_saferoom_heavy_m60_reload_anim", "1", "1 = press the reload key for the player so the game plays its own reload (with animation), 0 = top the clip up instantly.", _, true, 0.0, true, 1.0);
+	g_cvReloadAt = CreateConVar("l4d2_saferoom_heavy_m60_reload_at", "3", "Reload the M60 from the reserve once its clip drops to this many rounds or fewer.", _, true, 0.0, true, 50.0);
+	g_cvAutoReload = CreateConVar("l4d2_saferoom_heavy_m60_autoreload", "1", "1 = when the M60 clip runs dry, reload it from the reserve ammo the game would otherwise wipe.", _, true, 0.0, true, 1.0);
+	g_cvDebug = CreateConVar("l4d2_saferoom_heavy_debug", "0", "1 = print every change of the M60 / grenade launcher reserve ammo to the server console.", _, true, 0.0, true, 1.0);
+	g_cvKeepM60 = CreateConVar("l4d2_saferoom_heavy_keep_m60", "1", "1 = an empty M60 is no longer thrown away by the game, so it can be refilled at an ammo pile.", _, true, 0.0, true, 1.0);
+
+	// 支援插件中途載入(已在線的玩家也要掛鉤)
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i))
+			HookClient(i);
+	}
 
 	g_cvM60Max.AddChangeHook(OnAmmoSettingChanged);
 	g_cvGLMax.AddChangeHook(OnAmmoSettingChanged);
@@ -95,6 +122,12 @@ public void OnMapStart()
 	PrecacheModel("models/w_models/weapons/w_grenade_launcher.mdl", true);
 	PrecacheModel("models/weapons/melee/w_chainsaw.mdl", true);
 	PrecacheModel("models/w_models/weapons/w_eq_medkit.mdl", true);
+	PrecacheModel("models/w_models/weapons/w_laser_sights.mdl", true);
+
+	// 武士刀:不是每張地圖都有載入,不預先快取的話生成出來會是看不見、撿不起來的空殼
+	PrecacheModel("models/weapons/melee/v_katana.mdl", true);
+	PrecacheModel("models/weapons/melee/w_katana.mdl", true);
+	PrecacheGeneric("scripts/melee/katana.txt", true);
 	ApplyAmmoCvars();
 }
 
@@ -192,9 +225,11 @@ public Action Timer_Drop(Handle timer, any round)
 	int m60   = g_cvM60.IntValue;
 	int gl    = g_cvGL.IntValue;
 	int saw   = g_cvSaw.IntValue;
-	int total = m60 + gl + saw + g_cvMedkit.IntValue;
+	int medkit = g_cvMedkit.IntValue;
+	int laser  = g_cvLaser.IntValue;
+	int total  = m60 + gl + saw + medkit + laser + g_cvKatana.IntValue;
 
-	// 依序發 M60、榴彈發射器、電鋸、醫療包。東西比人數多時從頭再輪一遍,
+	// 依序發 M60、榴彈發射器、電鋸、醫療包、雷射瞄準器、武士刀。東西比人數多時從頭再輪一遍,
 	// 這樣有人會同時被抽到兩件,但每件都會掉
 	for (int k = 0; k < total; k++)
 	{
@@ -214,10 +249,20 @@ public Action Timer_Drop(Handle timer, any round)
 			strcopy(classname, sizeof classname, WEAPON_SAW);
 			strcopy(label, sizeof label, "電鋸");
 		}
-		else
+		else if (k < m60 + gl + saw + medkit)
 		{
 			strcopy(classname, sizeof classname, WEAPON_MEDKIT);
 			strcopy(label, sizeof label, "醫療包");
+		}
+		else if (k < m60 + gl + saw + medkit + laser)
+		{
+			strcopy(classname, sizeof classname, UPGRADE_LASER);
+			strcopy(label, sizeof label, "雷射瞄準器");
+		}
+		else
+		{
+			strcopy(classname, sizeof classname, WEAPON_KATANA);
+			strcopy(label, sizeof label, "武士刀");
 		}
 
 		int target = list[k % count];
@@ -235,9 +280,15 @@ public Action Timer_Drop(Handle timer, any round)
 // 在指定玩家腳邊生成一把武器,成功回傳 true
 bool SpawnWeaponAt(int client, const char[] classname)
 {
-	int ent = CreateEntityByName(classname);
+	bool katana = StrEqual(classname, WEAPON_KATANA);
+
+	int ent = CreateEntityByName(katana ? "weapon_melee" : classname);
 	if (ent == -1)
 		return false;
+
+	// 近戰武器要在生成前指定是哪一把
+	if (katana)
+		DispatchKeyValue(ent, "melee_script_name", "katana");
 
 	float pos[3];
 	GetClientAbsOrigin(client, pos);
@@ -260,8 +311,104 @@ bool SpawnWeaponAt(int client, const char[] classname)
 
 // 有些武器(例如電鋸)拿在手上用彈藥堆時,遊戲不會發出 ammo_pickup 事件,
 // 所以另外偵測:按下使用鍵、準心對著附近的彈藥堆,就當作補彈
+// 追蹤主武器欄 M60 / 榴彈發射器的備彈:
+// 1. M60 的彈夾一打到 0,遊戲會連備彈一起清成 0(它原本「打完就丟」的邏輯),備彈永遠用不到。
+//    偵測到這個瞬間,就用被清掉前的備彈自動補一個彈夾,等於幫它換彈
+// 2. 除錯開啟時,備彈一有變動就印出來
+void TrackAmmo(int client, int &buttons)
+{
+	int weapon = GetPlayerWeaponSlot(client, 0);
+	if (weapon <= MaxClients || !IsValidEntity(weapon))
+	{
+		g_iLastReserve[client] = -1;
+		return;
+	}
+
+	char classname[64];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	if (GetClipSize(classname) == 0)
+	{
+		g_iLastReserve[client] = -1;
+		return;
+	}
+
+	int type = GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType");
+	if (type < 0)
+		return;
+
+	int clip    = GetEntProp(weapon, Prop_Send, "m_iClip1");
+	int reserve = GetEntProp(client, Prop_Send, "m_iAmmo", _, type);
+
+	bool isM60 = StrEqual(classname, WEAPON_M60);
+
+	// 子彈快用完(剩 reload_at 發以下)但還有備彈時,就先把彈夾補滿,
+	// 這樣彈夾永遠不會真的歸 0,遊戲也就沒機會清掉備彈或丟掉武器
+	if (g_cvAutoReload.BoolValue && isM60 && clip <= g_cvReloadAt.IntValue && reserve > 0)
+	{
+		bool holding = (GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon") == weapon);
+
+		if (holding && g_cvReloadAnim.BoolValue)
+		{
+			// 替玩家按下換彈鍵,讓遊戲自己換彈(有換彈動畫)。
+			// 遊戲在開火鍵按住且彈夾還有子彈時會優先開火、不處理換彈,所以要同時鬆開開火鍵
+			float now      = GetGameTime();
+			bool  inReload = HasEntProp(weapon, Prop_Send, "m_bInReload") && GetEntProp(weapon, Prop_Send, "m_bInReload") != 0;
+
+			if (inReload)
+			{
+				g_flReloadSince[client] = 0.0;
+			}
+			else if (now >= g_flReloadCooldown[client])
+			{
+				buttons &= ~IN_ATTACK;
+				buttons |= IN_RELOAD;
+
+				if (g_flReloadSince[client] == 0.0)
+				{
+					g_flReloadSince[client] = now;
+				}
+				else if (now - g_flReloadSince[client] > 0.5)
+				{
+					// 半秒了遊戲還是沒開始換彈,先放棄,隔 3 秒再試,免得一直吃掉玩家的開火鍵
+					g_flReloadCooldown[client] = now + 3.0;
+					g_flReloadSince[client]    = 0.0;
+				}
+			}
+		}
+		else
+		{
+			// 沒拿在手上,或關掉動畫模式:直接補彈,沒有動畫
+			int give = (CLIP_M60 - clip < reserve) ? (CLIP_M60 - clip) : reserve;
+			clip    += give;
+			reserve -= give;
+			SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
+			SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, type);
+		}
+	}
+
+	// 保險:如果還是來不及,彈夾已經歸 0 且備彈剛被清掉,就用清掉前的備彈補回
+	if (g_cvAutoReload.BoolValue && isM60 && clip <= 0 && reserve == 0 && g_iLastReserve[client] > 0)
+	{
+		int give = (g_iLastReserve[client] < CLIP_M60) ? g_iLastReserve[client] : CLIP_M60;
+		reserve  = g_iLastReserve[client] - give;
+		clip     = give;
+		SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
+		SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, type);
+	}
+
+	if (reserve != g_iLastReserve[client])
+	{
+		if (g_cvDebug.BoolValue)
+			PrintToServer("[HeavyAmmo] %N %s reserve %d -> %d (clip=%d)", client, classname, g_iLastReserve[client], reserve, clip);
+		g_iLastReserve[client] = reserve;
+	}
+}
+
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
+	if (!IsFakeClient(client) && IsPlayerAlive(client))
+		TrackAmmo(client, buttons);
+
 	int pressed = buttons & ~g_iLastButtons[client];
 	g_iLastButtons[client] = buttons;
 
@@ -302,24 +449,77 @@ public Action Timer_Refill(Handle timer, any userid)
 	if (client < 1 || !IsClientInGame(client) || !IsPlayerAlive(client))
 		return Plugin_Stop;
 
-	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
-	if (weapon <= MaxClients || !IsValidEntity(weapon))
-		return Plugin_Stop;
+	// 不只看手上拿的,而是把主武器欄(0)和副武器欄(1)都檢查一遍:
+	// 榴彈發射器打空後遊戲不讓你切換過去,但它還在背包裡,所以不用切過去也能補彈
+	for (int slot = 0; slot <= 1; slot++)
+	{
+		int weapon = GetPlayerWeaponSlot(client, slot);
+		if (weapon <= MaxClients || !IsValidEntity(weapon))
+			continue;
+
+		char classname[64];
+		GetEntityClassname(weapon, classname, sizeof classname);
+
+		int clip = GetClipSize(classname);
+		if (clip == 0)
+			continue; // 不是 M60 / 榴彈發射器 / 電鋸
+
+		SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
+
+		int reserve = GetReserveTarget(classname);
+		if (reserve >= 0)
+			SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType"));
+	}
+
+	return Plugin_Stop;
+}
+
+// ---------------------------------------------------------------------------
+// 防止 M60 打空後被遊戲自動丟掉
+// ---------------------------------------------------------------------------
+
+public void OnClientPutInServer(int client)
+{
+	HookClient(client);
+}
+
+void HookClient(int client)
+{
+	SDKHook(client, SDKHook_WeaponDrop, OnWeaponDrop);
+	SDKHook(client, SDKHook_WeaponCanSwitchTo, OnWeaponSwitchCheck);
+	SDKHook(client, SDKHook_WeaponSwitch, OnWeaponSwitchCheck);
+}
+
+// 切換到彈夾為 0 的 M60 時,遊戲會直接把它丟掉,所以乾脆不讓你切過去
+// (跟打空的榴彈發射器一樣,留在背包裡,靠彈藥堆補彈)
+public Action OnWeaponSwitchCheck(int client, int weapon)
+{
+	if (!g_cvKeepM60.BoolValue || weapon <= MaxClients || !IsValidEntity(weapon))
+		return Plugin_Continue;
 
 	char classname[64];
 	GetEntityClassname(weapon, classname, sizeof classname);
+	if (!StrEqual(classname, WEAPON_M60))
+		return Plugin_Continue;
 
-	int clip = GetClipSize(classname);
-	if (clip == 0)
-		return Plugin_Stop; // 不是 M60 / 榴彈發射器 / 電鋸
+	return (GetEntProp(weapon, Prop_Send, "m_iClip1") <= 0) ? Plugin_Handled : Plugin_Continue;
+}
 
-	SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
+public Action OnWeaponDrop(int client, int weapon)
+{
+	if (!g_cvKeepM60.BoolValue || weapon <= MaxClients || !IsValidEntity(weapon))
+		return Plugin_Continue;
 
-	int reserve = GetReserveTarget(classname);
-	if (reserve >= 0)
-		SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType"));
+	char classname[64];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	if (!StrEqual(classname, WEAPON_M60))
+		return Plugin_Continue;
 
-	return Plugin_Stop;
+	// 只擋「打空後被丟掉」,彈夾還有子彈時照舊
+	if (GetEntProp(weapon, Prop_Send, "m_iClip1") > 0)
+		return Plugin_Continue;
+
+	return Plugin_Handled;
 }
 
 // 這把武器的彈夾容量,不是我們處理的武器回傳 0
