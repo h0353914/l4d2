@@ -37,6 +37,7 @@ ConVar g_cvSaw;
 ConVar g_cvMedkit;
 ConVar g_cvLaser;
 ConVar g_cvKatana;
+ConVar g_cvKatanaDelay;
 ConVar g_cvKeepM60;
 ConVar g_cvDebug;
 ConVar g_cvAutoReload;
@@ -72,6 +73,7 @@ public void OnPluginStart()
 	g_cvMedkit = CreateConVar("l4d2_saferoom_heavy_medkit",  "16","How many first aid kits to drop.", _, true, 0.0, true, 16.0);
 	g_cvLaser  = CreateConVar("l4d2_saferoom_heavy_laser",    "1", "How many laser sight boxes to drop.", _, true, 0.0, true, 4.0);
 	g_cvKatana = CreateConVar("l4d2_saferoom_heavy_katana",   "4", "How many katanas to drop.", _, true, 0.0, true, 8.0);
+	g_cvKatanaDelay = CreateConVar("l4d2_saferoom_heavy_katana_delay", "0.35", "Seconds between two katana swings (vanilla 0.8, cannot be set slower than that).", _, true, 0.1, true, 0.8);
 
 	g_cvRefill     = CreateConVar("l4d2_saferoom_heavy_refill",    "1",  "1 = using an ammo pile while holding an M60 / grenade launcher refills it.", _, true, 0.0, true, 1.0);
 	g_cvM60Reserve = CreateConVar("l4d2_saferoom_heavy_m60_reserve", "-1", "Reserve ammo set on a dropped / refilled M60. -1 = ammo_m60_max minus the clip size.", _, true, -1.0);
@@ -88,6 +90,9 @@ public void OnPluginStart()
 
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 	HookEvent("ammo_pickup", Event_AmmoPickup);
+
+	// 武士刀揮砍速度,每 0.05 秒檢查一次(跨地圖一直跑)
+	CreateTimer(0.05, Timer_Katana, _, TIMER_REPEAT);
 
 	g_cvReloadAnim = CreateConVar("l4d2_saferoom_heavy_m60_reload_anim", "1", "1 = press the reload key for the player so the game plays its own reload (with animation), 0 = top the clip up instantly.", _, true, 0.0, true, 1.0);
 	g_cvReloadAt = CreateConVar("l4d2_saferoom_heavy_m60_reload_at", "3", "Reload the M60 from the reserve once its clip drops to this many rounds or fewer.", _, true, 0.0, true, 50.0);
@@ -634,6 +639,46 @@ int GetReserveTarget(const char[] classname)
 
 	reserve = cv.IntValue - GetClipSize(classname);
 	return (reserve > 0) ? reserve : 0;
+}
+
+// ---------------------------------------------------------------------------
+// 武士刀揮砍速度
+// ---------------------------------------------------------------------------
+
+// 遊戲每次揮砍後都會把下一次可以攻擊的時間設成原版的 0.8 秒,
+// 所以每 0.05 秒檢查一次,手上是武士刀且剩餘等待時間超過設定值的,就拉回到設定值
+public Action Timer_Katana(Handle timer)
+{
+	float now   = GetGameTime();
+	float delay = g_cvKatanaDelay.FloatValue;
+
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || !IsPlayerAlive(i))
+			continue;
+
+		int weapon = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
+		if (weapon <= MaxClients || !IsValidEntity(weapon) || !IsKatana(weapon))
+			continue;
+
+		float next = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+		if (next - now > delay)
+			SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + delay);
+	}
+
+	return Plugin_Continue;
+}
+
+bool IsKatana(int weapon)
+{
+	char classname[32];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	if (!StrEqual(classname, "weapon_melee") || !HasEntProp(weapon, Prop_Data, "m_strMapSetScriptName"))
+		return false;
+
+	char script[32];
+	GetEntPropString(weapon, Prop_Data, "m_strMapSetScriptName", script, sizeof script);
+	return StrEqual(script, "katana", false);
 }
 
 // ---------------------------------------------------------------------------
