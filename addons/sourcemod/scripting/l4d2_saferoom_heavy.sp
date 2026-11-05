@@ -115,7 +115,7 @@ public void OnPluginStart()
 	g_cvM60Max = CreateConVar("l4d2_saferoom_heavy_m60_max", "1200", "Force the game's ammo_m60_max to this value (-1 = do not touch it).", _, true, -1.0);
 	g_cvGLMax  = CreateConVar("l4d2_saferoom_heavy_gl_max",  "120", "Force the game's ammo_grenadelauncher_max to this value (-1 = do not touch it).", _, true, -1.0);
 	g_cvM60Mag = CreateConVar("l4d2_saferoom_heavy_m60_mag", "254", "M60 magazine size: rounds in the clip after a reload (150 = vanilla, 255 = the most the game can network). Counted inside ammo_m60_max.", _, true, 1.0, true, 255.0);
-	g_cvGLMag  = CreateConVar("l4d2_saferoom_heavy_gl_mag",  "10",  "Grenade launcher magazine size: shots fired before it needs a reload (1 = vanilla, one shot per reload).", _, true, 1.0, true, 65.0);
+	g_cvGLMag  = CreateConVar("l4d2_saferoom_heavy_gl_mag",  "20",  "Grenade launcher magazine size: shots fired before it needs a reload (1 = vanilla, one shot per reload).", _, true, 1.0, true, 65.0);
 	g_cvSawReserve = CreateConVar("l4d2_saferoom_heavy_chainsaw_reserve", "-1", "Reserve fuel set on a refilled chainsaw. -1 = ammo_chainsaw_max minus the clip size.", _, true, -1.0);
 	g_cvSawMax     = CreateConVar("l4d2_saferoom_heavy_chainsaw_max",     "60","Force the game's ammo_chainsaw_max to this value (-1 = do not touch it).", _, true, -1.0);
 	g_cvShotgunMax = CreateConVar("l4d2_saferoom_heavy_shotgun_max", "240", "Force the game's ammo_shotgun_max to this value (-1 = do not touch it).", _, true, -1.0);
@@ -500,7 +500,7 @@ void TrackAmmo(int client, int &buttons)
 		SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, type);
 	}
 
-	// M60 / 榴彈發射器的彈夾比遊戲原本的容量大(M60 預設 254、榴彈發射器預設 10)。
+	// M60 / 榴彈發射器的彈夾比遊戲原本的容量大(M60 預設 254、榴彈發射器預設 20)。
 	// 遊戲換彈只會補到原本的容量,所以把「換彈完成」的瞬間(彈夾剛補到原容量,或剛拿到這把槍)
 	// 視為換彈,再從備彈補到我們設定的彈夾容量
 	int base = GetClipSize(classname);
