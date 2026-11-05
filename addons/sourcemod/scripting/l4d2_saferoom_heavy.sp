@@ -47,6 +47,8 @@ ConVar g_cvM60Reserve;
 ConVar g_cvGLReserve;
 ConVar g_cvM60Max;
 ConVar g_cvGLMax;
+ConVar g_cvGLMag;
+ConVar g_cvM60Mag;
 ConVar g_cvSawReserve;
 ConVar g_cvSawMax;
 
@@ -56,6 +58,8 @@ int  g_iLastButtons[MAXPLAYERS + 1];
 float g_flReloadSince[MAXPLAYERS + 1];    // 開始替玩家按換彈鍵的時間,0 表示沒在按
 float g_flReloadCooldown[MAXPLAYERS + 1]; // 換彈一直沒成功時,這個時間之前不再替玩家按
 int  g_iLastReserve[MAXPLAYERS + 1] = { -1, ... }; // 除錯用:上次看到的備彈數
+int  g_iMagRef[MAXPLAYERS + 1]      = { INVALID_ENT_REFERENCE, ... }; // 上次看到的主武器(榴彈發射器)
+int  g_iMagPrevClip[MAXPLAYERS + 1] = { -1, ... };                    // 上次看到的榴彈發射器彈夾
 public void OnPluginStart()
 {
 	CreateConVar("l4d2_saferoom_heavy_version", PLUGIN_VERSION, "Plugin version", FCVAR_NOTIFY | FCVAR_DONTRECORD);
@@ -65,7 +69,7 @@ public void OnPluginStart()
 	g_cvGL     = CreateConVar("l4d2_saferoom_heavy_gl",     "4","How many grenade launchers to drop (one per randomly picked survivor).", _, true, 0.0, true, 4.0);
 
 	g_cvSaw    = CreateConVar("l4d2_saferoom_heavy_chainsaw", "4","How many chainsaws to drop.", _, true, 0.0, true, 4.0);
-	g_cvMedkit = CreateConVar("l4d2_saferoom_heavy_medkit",   "8","How many first aid kits to drop.", _, true, 0.0, true, 8.0);
+	g_cvMedkit = CreateConVar("l4d2_saferoom_heavy_medkit",  "16","How many first aid kits to drop.", _, true, 0.0, true, 16.0);
 	g_cvLaser  = CreateConVar("l4d2_saferoom_heavy_laser",    "1", "How many laser sight boxes to drop.", _, true, 0.0, true, 4.0);
 	g_cvKatana = CreateConVar("l4d2_saferoom_heavy_katana",   "4", "How many katanas to drop.", _, true, 0.0, true, 8.0);
 
@@ -73,8 +77,10 @@ public void OnPluginStart()
 	g_cvM60Reserve = CreateConVar("l4d2_saferoom_heavy_m60_reserve", "-1", "Reserve ammo set on a dropped / refilled M60. -1 = ammo_m60_max minus the clip size.", _, true, -1.0);
 	g_cvGLReserve  = CreateConVar("l4d2_saferoom_heavy_gl_reserve",  "-1", "Reserve ammo set on a dropped / refilled grenade launcher. -1 = ammo_grenadelauncher_max minus the clip size.", _, true, -1.0);
 
-	g_cvM60Max = CreateConVar("l4d2_saferoom_heavy_m60_max", "600", "Force the game's ammo_m60_max to this value (-1 = do not touch it).", _, true, -1.0);
-	g_cvGLMax  = CreateConVar("l4d2_saferoom_heavy_gl_max",  "65",  "Force the game's ammo_grenadelauncher_max to this value (-1 = do not touch it).", _, true, -1.0);
+	g_cvM60Max = CreateConVar("l4d2_saferoom_heavy_m60_max", "1200", "Force the game's ammo_m60_max to this value (-1 = do not touch it).", _, true, -1.0);
+	g_cvGLMax  = CreateConVar("l4d2_saferoom_heavy_gl_max",  "120", "Force the game's ammo_grenadelauncher_max to this value (-1 = do not touch it).", _, true, -1.0);
+	g_cvM60Mag = CreateConVar("l4d2_saferoom_heavy_m60_mag", "254", "M60 magazine size: rounds in the clip after a reload (150 = vanilla, 255 = the most the game can network). Counted inside ammo_m60_max.", _, true, 1.0, true, 255.0);
+	g_cvGLMag  = CreateConVar("l4d2_saferoom_heavy_gl_mag",  "10",  "Grenade launcher magazine size: shots fired before it needs a reload (1 = vanilla, one shot per reload).", _, true, 1.0, true, 65.0);
 	g_cvSawReserve = CreateConVar("l4d2_saferoom_heavy_chainsaw_reserve", "-1", "Reserve fuel set on a refilled chainsaw. -1 = ammo_chainsaw_max minus the clip size.", _, true, -1.0);
 	g_cvSawMax     = CreateConVar("l4d2_saferoom_heavy_chainsaw_max",     "60","Force the game's ammo_chainsaw_max to this value (-1 = do not touch it).", _, true, -1.0);
 
@@ -321,6 +327,8 @@ void TrackAmmo(int client, int &buttons)
 	if (weapon <= MaxClients || !IsValidEntity(weapon))
 	{
 		g_iLastReserve[client] = -1;
+		g_iMagRef[client]       = INVALID_ENT_REFERENCE;
+		g_iMagPrevClip[client]  = -1;
 		return;
 	}
 
@@ -329,6 +337,8 @@ void TrackAmmo(int client, int &buttons)
 	if (GetClipSize(classname) == 0)
 	{
 		g_iLastReserve[client] = -1;
+		g_iMagRef[client]       = INVALID_ENT_REFERENCE;
+		g_iMagPrevClip[client]  = -1;
 		return;
 	}
 
@@ -378,7 +388,7 @@ void TrackAmmo(int client, int &buttons)
 		else
 		{
 			// 沒拿在手上,或關掉動畫模式:直接補彈,沒有動畫
-			int give = (CLIP_M60 - clip < reserve) ? (CLIP_M60 - clip) : reserve;
+			int give = (GetMagSize(classname) - clip < reserve) ? (GetMagSize(classname) - clip) : reserve;
 			clip    += give;
 			reserve -= give;
 			SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
@@ -389,11 +399,43 @@ void TrackAmmo(int client, int &buttons)
 	// 保險:如果還是來不及,彈夾已經歸 0 且備彈剛被清掉,就用清掉前的備彈補回
 	if (g_cvAutoReload.BoolValue && isM60 && clip <= 0 && reserve == 0 && g_iLastReserve[client] > 0)
 	{
-		int give = (g_iLastReserve[client] < CLIP_M60) ? g_iLastReserve[client] : CLIP_M60;
+		int give = (g_iLastReserve[client] < GetMagSize(classname)) ? g_iLastReserve[client] : GetMagSize(classname);
 		reserve  = g_iLastReserve[client] - give;
 		clip     = give;
 		SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
 		SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, type);
+	}
+
+	// M60 / 榴彈發射器的彈夾比遊戲原本的容量大(M60 預設 254、榴彈發射器預設 10)。
+	// 遊戲換彈只會補到原本的容量,所以把「換彈完成」的瞬間(彈夾剛補到原容量,或剛拿到這把槍)
+	// 視為換彈,再從備彈補到我們設定的彈夾容量
+	int base = GetClipSize(classname);
+	int mag  = GetMagSize(classname);
+	if (mag > base)
+	{
+		int  ref      = EntIndexToEntRef(weapon);
+		bool newGun   = (ref != g_iMagRef[client]);
+		bool reloaded = (g_iMagPrevClip[client] >= 0 && g_iMagPrevClip[client] < base && clip == base);
+
+		if ((newGun || reloaded) && clip == base && reserve > 0)
+		{
+			int give = mag - base;
+			if (give > reserve)
+				give = reserve;
+
+			clip    += give;
+			reserve -= give;
+			SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
+			SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, type);
+		}
+
+		g_iMagRef[client]      = ref;
+		g_iMagPrevClip[client] = clip;
+	}
+	else
+	{
+		g_iMagRef[client]      = INVALID_ENT_REFERENCE;
+		g_iMagPrevClip[client] = -1;
 	}
 
 	if (reserve != g_iLastReserve[client])
@@ -464,9 +506,19 @@ public Action Timer_Refill(Handle timer, any userid)
 		if (clip == 0)
 			continue; // 不是 M60 / 榴彈發射器 / 電鋸
 
+		int reserve = GetReserveTarget(classname);
+
+		// M60 / 榴彈發射器補彈後直接給滿設定的彈夾容量,總彈量(彈夾 + 備彈)不變
+		int mag = GetMagSize(classname);
+		if (reserve >= 0 && mag > clip)
+		{
+			int total = reserve + clip;
+			clip      = (mag < total) ? mag : total;
+			reserve   = total - clip;
+		}
+
 		SetEntProp(weapon, Prop_Send, "m_iClip1", clip);
 
-		int reserve = GetReserveTarget(classname);
 		if (reserve >= 0)
 			SetEntProp(client, Prop_Send, "m_iAmmo", reserve, _, GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType"));
 	}
@@ -532,6 +584,16 @@ int GetClipSize(const char[] classname)
 	if (StrEqual(classname, WEAPON_SAW))
 		return CLIP_SAW;
 	return 0;
+}
+
+// 這把武器我們設定的彈夾容量(比遊戲原本大時,換彈後會再補滿到這個數),沒設定就等於原本容量
+int GetMagSize(const char[] classname)
+{
+	if (StrEqual(classname, WEAPON_M60))
+		return (g_cvM60Mag.IntValue > CLIP_M60) ? g_cvM60Mag.IntValue : CLIP_M60;
+	if (StrEqual(classname, WEAPON_GL))
+		return (g_cvGLMag.IntValue > CLIP_GL) ? g_cvGLMag.IntValue : CLIP_GL;
+	return GetClipSize(classname);
 }
 
 // 這把武器該有的備用彈藥數,-1 表示不去動(交給遊戲)
