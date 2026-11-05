@@ -14,6 +14,13 @@
 #define WEAPON_MEDKIT  "weapon_first_aid_kit"
 #define UPGRADE_LASER  "upgrade_laser_sight" // 雷射瞄準器補給箱(不是武器,是可以按使用鍵的實體)
 #define WEAPON_KATANA  "weapon_melee_katana" // 假的 classname,實際生成 weapon_melee 並指定腳本名稱 katana
+#define WEAPON_CHROME  "weapon_shotgun_chrome" // 霰彈槍(單發每顆彈丸傷害最高:31)
+#define WEAPON_AWP     "weapon_sniper_awp"     // 狙擊槍(單發傷害最高:115)
+#define WEAPON_AMMO    "weapon_ammo_spawn"     // 補彈藥點(彈藥堆)
+#define WEAPON_DEFIB   "weapon_defibrillator"  // 電擊器
+#define MAG_CHROME     50 // 霰彈槍的彈夾(原版 8 發)
+#define CHROME_RELOAD_MAX 8 // 霰彈槍彈夾要少於這個數才能換彈(R)
+#define MAG_AWP        50 // 狙擊槍的彈夾(原版 20 發)
 
 public Plugin myinfo =
 {
@@ -38,6 +45,22 @@ ConVar g_cvMedkit;
 ConVar g_cvLaser;
 ConVar g_cvKatana;
 ConVar g_cvKatanaDelay;
+ConVar g_cvChromeDelay;
+ConVar g_cvAWPDelay;
+int g_iFireRef[MAXPLAYERS + 1];  // 上次看到手上的霰彈槍 / 狙擊槍(偵測開火用)
+int g_iFireClip[MAXPLAYERS + 1]; // 上次看到的彈夾數
+int   g_iShotRef[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... }; // 上次看到主武器欄的霰彈槍 / 狙擊槍
+int   g_iShotClip[MAXPLAYERS + 1];   // 上次看到的彈夾數(偵測變化)
+bool  g_bShotEmpty[MAXPLAYERS + 1];  // 彈夾打空了,等換彈完成後補到設定的彈夾數
+float g_flShotChanged[MAXPLAYERS + 1]; // 彈夾最後一次變化的時間
+
+ConVar g_cvChrome;
+ConVar g_cvAWP;
+ConVar g_cvAmmo;
+ConVar g_cvDefib;
+ConVar g_cvChromeRes;
+ConVar g_cvAWPRes;
+
 ConVar g_cvKeepM60;
 ConVar g_cvDebug;
 ConVar g_cvAutoReload;
@@ -52,6 +75,8 @@ ConVar g_cvGLMag;
 ConVar g_cvM60Mag;
 ConVar g_cvSawReserve;
 ConVar g_cvSawMax;
+ConVar g_cvShotgunMax;
+ConVar g_cvSniperMax;
 
 int  g_iRound;     // 每回合遞增,用來讓上一回合還沒跑完的計時器失效
 bool g_bApplying;  // 我們自己正在改 ammo cvar 時,不要觸發「被改掉就改回來」
@@ -74,6 +99,14 @@ public void OnPluginStart()
 	g_cvLaser  = CreateConVar("l4d2_saferoom_heavy_laser",    "1", "How many laser sight boxes to drop.", _, true, 0.0, true, 4.0);
 	g_cvKatana = CreateConVar("l4d2_saferoom_heavy_katana",   "4", "How many katanas to drop.", _, true, 0.0, true, 8.0);
 	g_cvKatanaDelay = CreateConVar("l4d2_saferoom_heavy_katana_delay", "0.35", "Seconds between two katana swings (vanilla 0.8, cannot be set slower than that).", _, true, 0.1, true, 0.8);
+	g_cvChromeDelay = CreateConVar("l4d2_saferoom_heavy_chrome_delay", "0.15", "Seconds between two chrome shotgun shots (vanilla 0.5, cannot be set slower than that).", _, true, 0.1, true, 0.5);
+	g_cvAWPDelay    = CreateConVar("l4d2_saferoom_heavy_awp_delay",    "0.15", "Seconds between two AWP shots (vanilla 1.05, cannot be set slower than that).", _, true, 0.1, true, 1.05);
+	g_cvChrome = CreateConVar("l4d2_saferoom_heavy_chrome", "4", "How many chrome shotguns (highest damage per pellet) to drop.", _, true, 0.0, true, 8.0);
+	g_cvAmmo   = CreateConVar("l4d2_saferoom_heavy_ammo", "2", "How many ammo piles (補彈藥點) to drop.", _, true, 0.0, true, 8.0);
+	g_cvDefib  = CreateConVar("l4d2_saferoom_heavy_defib", "4", "How many defibrillators to drop.", _, true, 0.0, true, 8.0);
+	g_cvAWP    = CreateConVar("l4d2_saferoom_heavy_awp",    "4", "How many AWP sniper rifles (highest single-shot damage) to drop.", _, true, 0.0, true, 8.0);
+	g_cvChromeRes = CreateConVar("l4d2_saferoom_heavy_chrome_reserve", "40", "Reserve rounds given when picking up a dropped chrome shotgun.", _, true, 0.0, true, 999.0);
+	g_cvAWPRes    = CreateConVar("l4d2_saferoom_heavy_awp_reserve",    "40", "Reserve rounds given when picking up a dropped AWP.", _, true, 0.0, true, 999.0);
 
 	g_cvRefill     = CreateConVar("l4d2_saferoom_heavy_refill",    "1",  "1 = using an ammo pile while holding an M60 / grenade launcher refills it.", _, true, 0.0, true, 1.0);
 	g_cvM60Reserve = CreateConVar("l4d2_saferoom_heavy_m60_reserve", "-1", "Reserve ammo set on a dropped / refilled M60. -1 = ammo_m60_max minus the clip size.", _, true, -1.0);
@@ -85,14 +118,16 @@ public void OnPluginStart()
 	g_cvGLMag  = CreateConVar("l4d2_saferoom_heavy_gl_mag",  "10",  "Grenade launcher magazine size: shots fired before it needs a reload (1 = vanilla, one shot per reload).", _, true, 1.0, true, 65.0);
 	g_cvSawReserve = CreateConVar("l4d2_saferoom_heavy_chainsaw_reserve", "-1", "Reserve fuel set on a refilled chainsaw. -1 = ammo_chainsaw_max minus the clip size.", _, true, -1.0);
 	g_cvSawMax     = CreateConVar("l4d2_saferoom_heavy_chainsaw_max",     "60","Force the game's ammo_chainsaw_max to this value (-1 = do not touch it).", _, true, -1.0);
+	g_cvShotgunMax = CreateConVar("l4d2_saferoom_heavy_shotgun_max", "240", "Force the game's ammo_shotgun_max to this value (-1 = do not touch it).", _, true, -1.0);
+	g_cvSniperMax  = CreateConVar("l4d2_saferoom_heavy_sniper_max",  "500", "Force the game's ammo_sniperrifle_max to this value (-1 = do not touch it).", _, true, -1.0);
 
 	RegAdminCmd("sm_heavyammo_info", Cmd_Info, ADMFLAG_CONFIG, "Print the ammo cvars of the M60 / grenade launcher and the ammo of the weapon you are holding");
 
 	HookEvent("round_start", Event_RoundStart, EventHookMode_PostNoCopy);
 	HookEvent("ammo_pickup", Event_AmmoPickup);
 
-	// 武士刀揮砍速度,每 0.05 秒檢查一次(跨地圖一直跑)
-	CreateTimer(0.05, Timer_Katana, _, TIMER_REPEAT);
+	// 武士刀 / 霰彈槍 / 狙擊槍的攻擊間隔,每 0.02 秒檢查一次(跨地圖一直跑)
+	CreateTimer(0.02, Timer_FireRate, _, TIMER_REPEAT);
 
 	g_cvReloadAnim = CreateConVar("l4d2_saferoom_heavy_m60_reload_anim", "1", "1 = press the reload key for the player so the game plays its own reload (with animation), 0 = top the clip up instantly.", _, true, 0.0, true, 1.0);
 	g_cvReloadAt = CreateConVar("l4d2_saferoom_heavy_m60_reload_at", "3", "Reload the M60 from the reserve once its clip drops to this many rounds or fewer.", _, true, 0.0, true, 50.0);
@@ -110,6 +145,8 @@ public void OnPluginStart()
 	g_cvM60Max.AddChangeHook(OnAmmoSettingChanged);
 	g_cvGLMax.AddChangeHook(OnAmmoSettingChanged);
 	g_cvSawMax.AddChangeHook(OnAmmoSettingChanged);
+	g_cvShotgunMax.AddChangeHook(OnAmmoSettingChanged);
+	g_cvSniperMax.AddChangeHook(OnAmmoSettingChanged);
 
 	// 監聽遊戲本身的 cvar,被工作坊插件或設定檔改掉時改回來
 	ConVar cv = FindConVar("ammo_m60_max");
@@ -121,6 +158,14 @@ public void OnPluginStart()
 		cv.AddChangeHook(OnAmmoCvarChanged);
 
 	cv = FindConVar("ammo_chainsaw_max");
+	if (cv != null)
+		cv.AddChangeHook(OnAmmoCvarChanged);
+
+	cv = FindConVar("ammo_shotgun_max");
+	if (cv != null)
+		cv.AddChangeHook(OnAmmoCvarChanged);
+
+	cv = FindConVar("ammo_sniperrifle_max");
 	if (cv != null)
 		cv.AddChangeHook(OnAmmoCvarChanged);
 
@@ -139,6 +184,13 @@ public void OnMapStart()
 	PrecacheModel("models/weapons/melee/v_katana.mdl", true);
 	PrecacheModel("models/weapons/melee/w_katana.mdl", true);
 	PrecacheGeneric("scripts/melee/katana.txt", true);
+
+	// 霰彈槍與狙擊槍的世界模型,不是每張地圖都會載入,先預載才不會掉出來是空的
+	PrecacheModel("models/w_models/weapons/w_pumpshotgun_A.mdl", true);
+	PrecacheModel("models/w_models/weapons/w_sniper_awp.mdl", true);
+
+	// 電擊器的世界模型同樣不是每張地圖都會載入
+	PrecacheModel("models/w_models/weapons/w_defibrillator.mdl", true);
 	ApplyAmmoCvars();
 }
 
@@ -165,6 +217,8 @@ void ApplyAmmoCvars()
 	ForceCvar("ammo_m60_max", g_cvM60Max.IntValue);
 	ForceCvar("ammo_grenadelauncher_max", g_cvGLMax.IntValue);
 	ForceCvar("ammo_chainsaw_max", g_cvSawMax.IntValue);
+	ForceCvar("ammo_shotgun_max", g_cvShotgunMax.IntValue);
+	ForceCvar("ammo_sniperrifle_max", g_cvSniperMax.IntValue);
 	g_bApplying = false;
 }
 
@@ -238,9 +292,14 @@ public Action Timer_Drop(Handle timer, any round)
 	int saw   = g_cvSaw.IntValue;
 	int medkit = g_cvMedkit.IntValue;
 	int laser  = g_cvLaser.IntValue;
-	int total  = m60 + gl + saw + medkit + laser + g_cvKatana.IntValue;
+	int katana = g_cvKatana.IntValue;
+	int chrome = g_cvChrome.IntValue;
+	int awp    = g_cvAWP.IntValue;
+	int ammo   = g_cvAmmo.IntValue;
+	int defib  = g_cvDefib.IntValue;
+	int total  = m60 + gl + saw + medkit + laser + katana + chrome + awp + defib + ammo;
 
-	// 依序發 M60、榴彈發射器、電鋸、醫療包、雷射瞄準器、武士刀。東西比人數多時從頭再輪一遍,
+	// 依序發 M60、榴彈發射器、電鋸、醫療包、雷射瞄準器、武士刀、霰彈槍、狙擊槍。東西比人數多時從頭再輪一遍,
 	// 這樣有人會同時被抽到兩件,但每件都會掉
 	for (int k = 0; k < total; k++)
 	{
@@ -270,10 +329,30 @@ public Action Timer_Drop(Handle timer, any round)
 			strcopy(classname, sizeof classname, UPGRADE_LASER);
 			strcopy(label, sizeof label, "雷射瞄準器");
 		}
-		else
+		else if (k < m60 + gl + saw + medkit + laser + katana)
 		{
 			strcopy(classname, sizeof classname, WEAPON_KATANA);
 			strcopy(label, sizeof label, "武士刀");
+		}
+		else if (k < m60 + gl + saw + medkit + laser + katana + chrome)
+		{
+			strcopy(classname, sizeof classname, WEAPON_CHROME);
+			strcopy(label, sizeof label, "霰彈槍");
+		}
+		else if (k < m60 + gl + saw + medkit + laser + katana + chrome + awp)
+		{
+			strcopy(classname, sizeof classname, WEAPON_AWP);
+			strcopy(label, sizeof label, "狙擊槍");
+		}
+		else if (k < m60 + gl + saw + medkit + laser + katana + chrome + awp + defib)
+		{
+			strcopy(classname, sizeof classname, WEAPON_DEFIB);
+			strcopy(label, sizeof label, "電擊器");
+		}
+		else
+		{
+			strcopy(classname, sizeof classname, WEAPON_AMMO);
+			strcopy(label, sizeof label, "補彈藥點");
 		}
 
 		int target = list[k % count];
@@ -312,6 +391,16 @@ bool SpawnWeaponAt(int client, const char[] classname)
 	int reserve = GetReserveTarget(classname);
 	if (reserve >= 0 && HasEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo"))
 		SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", reserve);
+
+	// 霰彈槍 / 狙擊槍:撿起來時給的備用彈藥
+	if (StrEqual(classname, WEAPON_CHROME) && HasEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo"))
+		SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", g_cvChromeRes.IntValue);
+	else if (StrEqual(classname, WEAPON_AWP) && HasEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo"))
+		SetEntProp(ent, Prop_Send, "m_iExtraPrimaryAmmo", g_cvAWPRes.IntValue);
+
+	int mag = GetShotMag(classname);
+	if (mag > 0)
+		SetEntProp(ent, Prop_Send, "m_iClip1", mag);
 
 	return true;
 }
@@ -454,7 +543,31 @@ void TrackAmmo(int client, int &buttons)
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
 	if (!IsFakeClient(client) && IsPlayerAlive(client))
+	{
 		TrackAmmo(client, buttons);
+		TrackShotMag(client);
+
+		// 霰彈槍:彈夾 8 發以上按 R 時,遊戲原本不會換彈,所以先把彈夾多出來的子彈還給備彈,只留 7 發,
+		// 讓遊戲以為是「少於 8 發」而正常播放換彈動畫(遊戲會補到原版 8 發,之後由 TrackShotMag 補到 MAG_CHROME)
+		int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+		if ((buttons & IN_RELOAD) && active > MaxClients && IsValidEntity(active))
+		{
+			char cls[32];
+			GetEntityClassname(active, cls, sizeof cls);
+			int type = GetEntProp(active, Prop_Send, "m_iPrimaryAmmoType");
+			int clip = GetEntProp(active, Prop_Send, "m_iClip1");
+			if (StrEqual(cls, WEAPON_CHROME) && clip >= CHROME_RELOAD_MAX && type >= 0)
+			{
+				int reserve = GetEntProp(client, Prop_Send, "m_iAmmo", _, type);
+				if (reserve > 0)
+				{
+					SetEntProp(client, Prop_Send, "m_iAmmo", reserve + clip - 7, _, type);
+					SetEntProp(active, Prop_Send, "m_iClip1", 7);
+					g_bShotEmpty[client] = true; // 換彈完成後要補到設定值(TrackShotMag 會處理)
+				}
+			}
+		}
+	}
 
 	int pressed = buttons & ~g_iLastButtons[client];
 	g_iLastButtons[client] = buttons;
@@ -642,12 +755,13 @@ int GetReserveTarget(const char[] classname)
 }
 
 // ---------------------------------------------------------------------------
-// 武士刀揮砍速度
+// 近戰 / 霰彈槍 / 狙擊槍攻擊間隔
 // ---------------------------------------------------------------------------
 
-// 遊戲每次揮砍後都會把下一次可以攻擊的時間設成原版的 0.8 秒,
-// 所以每 0.05 秒檢查一次,手上是武士刀且剩餘等待時間超過設定值的,就拉回到設定值
-public Action Timer_Katana(Handle timer)
+// 遊戲每次攻擊後都會把下一次可以攻擊的時間設成原版的間隔(武士刀 0.8 秒),
+// 所以每 0.02 秒檢查一次,手上是武士刀且剩餘等待時間超過設定值的,就拉回到設定值
+// 霰彈槍 / 狙擊槍換彈時,遊戲會把換彈的等待時間設成原版長度,這裡把它縮短成 1/l4d2_saferoom_heavy_shot_reload_speed
+public Action Timer_FireRate(Handle timer)
 {
 	float now   = GetGameTime();
 	float delay = g_cvKatanaDelay.FloatValue;
@@ -658,15 +772,130 @@ public Action Timer_Katana(Handle timer)
 			continue;
 
 		int weapon = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
-		if (weapon <= MaxClients || !IsValidEntity(weapon) || !IsKatana(weapon))
+		if (weapon <= MaxClients || !IsValidEntity(weapon))
 			continue;
 
-		float next = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
-		if (next - now > delay)
-			SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + delay);
+		if (IsKatana(weapon))
+		{
+			float next = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+			if (next - now > delay)
+				SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + delay);
+		}
+		else if (IsShotgunOrSniper(weapon))
+		{
+			// 彈夾變少才代表真的開了一槍,這時把下一次攻擊的等待時間縮短成設定值
+			int ref  = EntIndexToEntRef(weapon);
+			int clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
+			bool shot = (ref == g_iFireRef[i] && clip < g_iFireClip[i]);
+			g_iFireRef[i]  = ref;
+			g_iFireClip[i] = clip;
+
+			if (shot)
+			{
+				float fire = GetShotDelay(weapon);
+				float next = GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack");
+				if (next - now > fire)
+					SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", now + fire);
+			}
+		}
 	}
 
 	return Plugin_Continue;
+}
+
+bool IsShotgunOrSniper(int weapon)
+{
+	char classname[32];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	return StrEqual(classname, WEAPON_CHROME) || StrEqual(classname, WEAPON_AWP);
+}
+
+// 霰彈槍 / 狙擊槍的彈夾固定為 MAG_CHROME / MAG_AWP 發
+// 規則:彈夾打空後,等遊戲的換彈完成(彈夾穩定不變一小段時間)再補到設定值;拿到槍時也補一次
+void TrackShotMag(int client)
+{
+	int weapon = GetPlayerWeaponSlot(client, 0);
+	if (weapon <= MaxClients || !IsValidEntity(weapon))
+	{
+		g_iShotRef[client] = INVALID_ENT_REFERENCE;
+		return;
+	}
+
+	char classname[32];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	int mag = GetShotMag(classname);
+	if (mag == 0)
+	{
+		g_iShotRef[client] = INVALID_ENT_REFERENCE;
+		return;
+	}
+
+	int type = GetEntProp(weapon, Prop_Send, "m_iPrimaryAmmoType");
+	if (type < 0)
+		return;
+
+	float now = GetGameTime();
+	int   clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
+
+	// 剛拿到這把槍:補到設定值
+	int ref = EntIndexToEntRef(weapon);
+	if (ref != g_iShotRef[client])
+	{
+		g_iShotRef[client]      = ref;
+		g_iShotClip[client]     = clip;
+		g_bShotEmpty[client]    = false;
+		g_flShotChanged[client] = now;
+		FillShot(client, weapon, type, mag);
+		return;
+	}
+
+	if (clip != g_iShotClip[client])
+	{
+		g_iShotClip[client]     = clip;
+		g_flShotChanged[client] = now;
+	}
+
+	if (clip <= 0)
+		g_bShotEmpty[client] = true;
+
+	if (g_bShotEmpty[client] && clip > 0 && now - g_flShotChanged[client] >= 0.3)
+	{
+		g_bShotEmpty[client] = false;
+		FillShot(client, weapon, type, mag);
+	}
+}
+
+// 從備彈補到彈夾的設定值
+void FillShot(int client, int weapon, int type, int mag)
+{
+	int clip    = GetEntProp(weapon, Prop_Send, "m_iClip1");
+	int reserve = GetEntProp(client, Prop_Send, "m_iAmmo", _, type);
+
+	int give = mag - clip;
+	if (give > reserve)
+		give = reserve;
+	if (give <= 0)
+		return;
+
+	SetEntProp(weapon, Prop_Send, "m_iClip1", clip + give);
+	SetEntProp(client, Prop_Send, "m_iAmmo", reserve - give, _, type);
+}
+
+// 這把武器的彈夾設定值,不是霰彈槍 / 狙擊槍回傳 0
+int GetShotMag(const char[] classname)
+{
+	if (StrEqual(classname, WEAPON_CHROME))
+		return MAG_CHROME;
+	if (StrEqual(classname, WEAPON_AWP))
+		return MAG_AWP;
+	return 0;
+}
+
+float GetShotDelay(int weapon)
+{
+	char classname[32];
+	GetEntityClassname(weapon, classname, sizeof classname);
+	return StrEqual(classname, WEAPON_CHROME) ? g_cvChromeDelay.FloatValue : g_cvAWPDelay.FloatValue;
 }
 
 bool IsKatana(int weapon)
@@ -687,7 +916,7 @@ bool IsKatana(int weapon)
 
 public Action Cmd_Info(int client, int args)
 {
-	static const char names[][] = { "ammo_m60_max", "ammo_grenadelauncher_max", "ammo_chainsaw_max" };
+	static const char names[][] = { "ammo_m60_max", "ammo_grenadelauncher_max", "ammo_chainsaw_max", "ammo_shotgun_max", "ammo_sniperrifle_max" };
 
 	for (int i = 0; i < sizeof names; i++)
 	{
