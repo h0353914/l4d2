@@ -52,7 +52,7 @@ int g_iFireClip[MAXPLAYERS + 1]; // 上次看到的彈夾數
 int   g_iShotRef[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... }; // 上次看到主武器欄的霰彈槍 / 狙擊槍
 int   g_iShotClip[MAXPLAYERS + 1];   // 上次看到的彈夾數(偵測變化)
 bool  g_bShotEmpty[MAXPLAYERS + 1];  // 彈夾打空了,等換彈完成後補到設定的彈夾數
-float g_flShotChanged[MAXPLAYERS + 1]; // 彈夾最後一次變化的時間
+int   g_iShotBase[MAXPLAYERS + 1];   // 等換彈時的基準彈夾數,彈夾比這個數多了就立刻補到設定值
 
 ConVar g_cvChrome;
 ConVar g_cvAWP;
@@ -564,6 +564,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 					SetEntProp(client, Prop_Send, "m_iAmmo", reserve + clip - 7, _, type);
 					SetEntProp(active, Prop_Send, "m_iClip1", 7);
 					g_bShotEmpty[client] = true; // 換彈完成後要補到設定值(TrackShotMag 會處理)
+					g_iShotBase[client]  = 7;
 				}
 			}
 		}
@@ -834,8 +835,7 @@ void TrackShotMag(int client)
 	if (type < 0)
 		return;
 
-	float now = GetGameTime();
-	int   clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
+	int clip = GetEntProp(weapon, Prop_Send, "m_iClip1");
 
 	// 剛拿到這把槍:補到設定值
 	int ref = EntIndexToEntRef(weapon);
@@ -844,21 +844,20 @@ void TrackShotMag(int client)
 		g_iShotRef[client]      = ref;
 		g_iShotClip[client]     = clip;
 		g_bShotEmpty[client]    = false;
-		g_flShotChanged[client] = now;
 		FillShot(client, weapon, type, mag);
 		return;
 	}
 
-	if (clip != g_iShotClip[client])
-	{
-		g_iShotClip[client]     = clip;
-		g_flShotChanged[client] = now;
-	}
+	g_iShotClip[client] = clip;
 
 	if (clip <= 0)
+	{
 		g_bShotEmpty[client] = true;
+		g_iShotBase[client]  = 0;
+	}
 
-	if (g_bShotEmpty[client] && clip > 0 && now - g_flShotChanged[client] >= 0.3)
+	// 彈夾比基準多了(遊戲換彈裝進子彈)就立刻補到設定值,不等換彈動畫結束
+	if (g_bShotEmpty[client] && clip > g_iShotBase[client])
 	{
 		g_bShotEmpty[client] = false;
 		FillShot(client, weapon, type, mag);
